@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AnonChat — Login</title>
+  <meta name="description" content="Anonymous real-time group chat. No registration needed.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="toast-container" class="toast-container"></div>
+
+  <div class="login-wrapper">
+    <div class="login-card">
+      <div class="logo">💬</div>
+      <h1>AnonChat</h1>
+      <p class="subtitle">Jump into real-time conversations — no sign-up needed</p>
+
+      <form id="login-form">
+        <div class="form-group">
+          <label for="username">Choose a username</label>
+          <input
+            type="text"
+            id="username"
+            class="form-input"
+            placeholder="e.g. ali_123"
+            minlength="2"
+            maxlength="24"
+            pattern="^[a-zA-Z0-9_]+$"
+            required
+            autofocus
+          >
+          <div class="form-hint">2–24 characters · letters, numbers, underscores</div>
+        </div>
+        <button type="submit" id="login-btn" class="btn btn-primary">
+          Enter Chat
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const API = '/api/v1';
+
+    function showToast(message, type = 'error') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 4000);
+    }
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('login-btn');
+      const username = document.getElementById('username').value.trim();
+
+      if (!username) return;
+
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Connecting...';
+
+      try {
+        const res = await fetch(`${API}/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username }),
+        });
+
+        const body = await res.json();
+
+        if (!body.success) {
+          showToast(body.error?.message || 'Login failed');
+          return;
+        }
+
+        // Store session
+        localStorage.setItem('sessionToken', body.data.sessionToken);
+        localStorage.setItem('username', body.data.user.username);
+        localStorage.setItem('userId', body.data.user.id);
+
+        // Redirect to rooms
+        window.location.href = '/rooms';
+      } catch (err) {
+        showToast('Network error. Please try again.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = 'Enter Chat';
+      }
+    });
+
+    // If already logged in, redirect
+    if (localStorage.getItem('sessionToken')) {
+      window.location.href = '/rooms';
+    }
+  </script>
+</body>
+</html>

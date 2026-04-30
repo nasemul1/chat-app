@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
@@ -8,11 +9,17 @@ import { RedisService } from './redis/redis.service';
 import { RedisIoAdapter } from './redis/redis.io-adapter';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { apiReference } from '@scalar/nestjs-api-reference';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const configService = app.get(ConfigService);
   const redisService = app.get(RedisService);
+
+  // ── EJS View Engine & Static Files ──────────────────────────────────────
+  app.setBaseViewsDir(join(__dirname, '..', 'views'));
+  app.setViewEngine('ejs');
+  app.useStaticAssets(join(__dirname, '..', 'public'));
 
   // Global ValidationPipe
   app.useGlobalPipes(
@@ -96,6 +103,7 @@ async function bootstrap() {
   const port = configService.get<number>('PORT') || 3000;
   await app.listen(port, () => {
     console.log(`🚀 Server running on http://localhost:${port}`);
+    console.log(`🖥️  Frontend: http://localhost:${port}/`);
     console.log(`📖 API Docs (Scalar): http://localhost:${port}/reference`);
     console.log(`📋 OpenAPI JSON: http://localhost:${port}/api-json`);
   });

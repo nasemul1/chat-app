@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AnonChat — Chat</title>
+  <meta name="description" content="Real-time anonymous chat room.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <div id="toast-container" class="toast-container"></div>
+
+  <div class="chat-wrapper">
+    <!-- Chat Top Bar -->
+    <header class="chat-topbar">
+      <a href="/rooms" class="chat-back" title="Back to rooms">←</a>
+      <div class="chat-room-info">
+        <div class="chat-room-name">
+          <span class="hash">#</span>
+          <span id="room-name">Loading…</span>
+        </div>
+        <div class="chat-active-users">
+          <span class="dot"></span>
+          <span id="active-count">0</span> online
+        </div>
+      </div>
+      <div id="connection-status" class="connection-status disconnected">
+        <span class="dot"></span>
+        <span id="conn-label">Connecting</span>
+      </div>
+    </header>
+
+    <!-- Messages -->
+    <div class="messages-area" id="messages-area">
+      <button class="btn btn-secondary load-more-btn hidden" id="load-more-btn">
+        Load older messages
+      </button>
+    </div>
+
+    <!-- Message Input -->
+    <div class="message-input-area">
+      <form class="message-form" id="message-form">
+        <input
+          type="text"
+          id="message-input"
+          class="form-input"
+          placeholder="Type a message…"
+          maxlength="1000"
+          autocomplete="off"
+          required
+        >
+        <button type="submit" class="btn-send" id="send-btn" title="Send">
+          ➤
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const API = '/api/v1';
+    const token = localStorage.getItem('sessionToken');
+    const username = localStorage.getItem('username');
+
+    // Auth guard
+    if (!token || !username) {
+      localStorage.clear();
+      window.location.href = '/';
+      throw new Error('Not authenticated');
+    }
+
+    // Extract room ID from URL: /chat/:roomId
+    const pathParts = window.location.pathname.split('/');
+    const roomId = pathParts[pathParts.length - 1];
+
+    if (!roomId) {
+      window.location.href = '/rooms';
+      throw new Error('No room ID');
+    }
+
+    // ── State ────────────────────────────────────────────────────────────────
+    let nextCursor = null;
+    let hasMore = false;
+    let socket = null;
+
+    // ── DOM Refs ─────────────────────────────────────────────────────────────
+    const messagesArea = document.getElementById('messages-area');
+    const loadMoreBtn = document.getElementById('load-more-btn');
+    const messageInput = document.getElementById('message-input');
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    function showToast(message, type = 'error') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 4000);
+    }
+
+    async function apiFetch(path, options = {}) {
+      const res = await fetch(`${API}${path}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          ...(options.headers || {}),
+        },
+      });
+
+      const body = await res.json();
+
+      if (!body.success) {
+        if (res.status === 401) {
+          localStorage.clear();
+          window.location.href = '/';
+          return;
+        }
+        throw new Error(body.error?.message || 'Request failed');
+      }
+
+      return body.data;
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function formatTime(dateStr) {
+      const d = new Date(dateStr);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function scrollToBottom() {
+      messagesArea.scrollTop = messagesArea.scrollHeight;
+    }
+
+    // ── Render Messages ──────────────────────────────────────────────────────
+    function createMessageEl(msg) {
+      const isSelf = msg.username === username;
+      const div = document.createElement('div');
+      div.className = `message ${isSelf ? 'self' : 'other'}`;
+      div.dataset.id = msg.id;
+      div.innerHTML = `
+        <div class="message-author">${escapeHtml(msg.username)}</div>
+        <div class="message-content">${escapeHtml(msg.content)}</div>
+        <div class="message-time">${formatTime(msg.createdAt)}</div>
+      `;
+      return div;
+    }
+
+    function createSystemMessage(text) {
+      const div = document.createElement('div');
+      div.className = 'system-message';
+      div.textContent = text;
+      return div;
+    }
+
+    function appendMessage(msg) {
+      if (document.querySelector(`.message[data-id="${msg.id}"]`)) {
+        return; // Already exists, do not duplicate
+      }
+      messagesArea.appendChild(createMessageEl(msg));
+      scrollToBottom();
+    }
+
+    function prependMessages(messages) {
+      // Messages come newest-first from API; reverse for chronological prepend
+      const reversed = [...messages].reverse();
+      const firstChild = loadMoreBtn.nextSibling;
+      reversed.forEach(msg => {
+        const el = createMessageEl(msg);
+        messagesArea.insertBefore(el, firstChild);
+      });
+    }
+
+    // ── Load Room Info ───────────────────────────────────────────────────────
+    async function loadRoomInfo() {
+      try {
+        const room = await apiFetch(`/rooms/${roomId}`);
+        document.getElementById('room-name').textContent = room.name;
+        document.getElementById('active-count').textContent = room.activeUsers;
+        document.title = `AnonChat — #${room.name}`;
+      } catch (err) {
+        showToast(err.message);
+        setTimeout(() => window.location.href = '/rooms', 2000);
+      }
+    }
+
+    // ── Load Messages (paginated) ────────────────────────────────────────────
+    async function loadMessages(cursor) {
+      try {
+        let url = `/rooms/${roomId}/messages?limit=50`;
+        if (cursor) url += `&before=${cursor}`;
+
+        const data = await apiFetch(url);
+
+        hasMore = data.hasMore;
+        nextCursor = data.nextCursor;
+
+        if (hasMore) {
+          loadMoreBtn.classList.remove('hidden');
+        } else {
+          loadMoreBtn.classList.add('hidden');
+        }
+
+        return data.messages;
+      } catch (err) {
+        showToast(err.message);
+        return [];
+      }
+    }
+
+    // ── WebSocket Connection ─────────────────────────────────────────────────
+    function connectSocket() {
+      socket = io('/chat', {
+        query: { token, roomId },
+        transports: ['websocket', 'polling'],
+      });
+
+      const connStatus = document.getElementById('connection-status');
+      const connLabel = document.getElementById('conn-label');
+
+      socket.on('connect', () => {
+        connStatus.className = 'connection-status connected';
+        connLabel.textContent = 'Connected';
+      });
+
+      socket.on('disconnect', () => {
+        connStatus.className = 'connection-status disconnected';
+        connLabel.textContent = 'Disconnected';
+      });
+
+      socket.on('connect_error', (err) => {
+        connStatus.className = 'connection-status disconnected';
+        connLabel.textContent = 'Error';
+        showToast('Connection failed: ' + (err.message || 'Unknown error'));
+      });
+
+      // ── Server Events ────────────────────────────────────────────────────
+      socket.on('room:joined', (data) => {
+        document.getElementById('active-count').textContent = data.activeUsers.length;
+        messagesArea.appendChild(createSystemMessage(`You joined the room`));
+        scrollToBottom();
+      });
+
+      socket.on('room:user_joined', (data) => {
+        document.getElementById('active-count').textContent = data.activeUsers.length;
+        messagesArea.appendChild(createSystemMessage(`${data.username} joined`));
+        scrollToBottom();
+      });
+
+      socket.on('room:user_left', (data) => {
+        document.getElementById('active-count').textContent = data.activeUsers.length;
+        messagesArea.appendChild(createSystemMessage(`${data.username} left`));
+        scrollToBottom();
+      });
+
+      socket.on('message:new', (msg) => {
+        // Avoid duplicating our own messages (they come back via broadcast)
+        if (!document.querySelector(`.message[data-id="${msg.id}"]`)) {
+          appendMessage(msg);
+        }
+      });
+
+      socket.on('room:deleted', (data) => {
+        showToast('This room has been deleted', 'info');
+        setTimeout(() => window.location.href = '/rooms', 2000);
+      });
+    }
+
+    // ── Send Message ─────────────────────────────────────────────────────────
+    document.getElementById('message-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const content = messageInput.value.trim();
+      if (!content) return;
+
+      messageInput.value = '';
+      messageInput.focus();
+
+      try {
+        const msg = await apiFetch(`/rooms/${roomId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({ content }),
+        });
+        appendMessage(msg);
+      } catch (err) {
+        showToast(err.message);
+      }
+    });
+
+    // ── Load More ────────────────────────────────────────────────────────────
+    loadMoreBtn.addEventListener('click', async () => {
+      loadMoreBtn.innerHTML = '<span class="spinner"></span> Loading…';
+      loadMoreBtn.disabled = true;
+
+      const msgs = await loadMessages(nextCursor);
+      prependMessages(msgs);
+
+      loadMoreBtn.disabled = false;
+      loadMoreBtn.innerHTML = 'Load older messages';
+    });
+
+    // ── Init ─────────────────────────────────────────────────────────────────
+    (async function init() {
+      await loadRoomInfo();
+
+      // Load initial messages
+      const msgs = await loadMessages();
+      // Reverse for chronological order (API returns newest first)
+      const chronological = [...msgs].reverse();
+      chronological.forEach(msg => {
+        messagesArea.appendChild(createMessageEl(msg));
+      });
+      scrollToBottom();
+
+      // Connect WebSocket
+      connectSocket();
+
+      // Focus input
+      messageInput.focus();
+    })();
+
+    // Cleanup on leave
+    window.addEventListener('beforeunload', () => {
+      if (socket) {
+        socket.emit('room:leave');
+        socket.disconnect();
+      }
+    });
+  </script>
+</body>
+</html>
