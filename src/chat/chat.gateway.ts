@@ -1,9 +1,6 @@
-import {
-  Injectable,
-  OnModuleDestroy,
-} from '@nestjs/common';
-import { Inject } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { Injectable, OnModuleDestroy } from "@nestjs/common";
+import { Inject } from "@nestjs/common";
+import { eq } from "drizzle-orm";
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
@@ -12,12 +9,12 @@ import {
   ConnectedSocket,
   WebSocketGateway,
   WebSocketServer,
-} from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
-import { DRIZZLE } from '../database/database.module';
-import { rooms } from '../database/schema';
-import { AuthService } from '../auth/auth.service';
-import { RedisService } from '../redis/redis.service';
+} from "@nestjs/websockets";
+import { Server, Socket } from "socket.io";
+import { DRIZZLE } from "../database/database.module";
+import { rooms } from "../database/schema";
+import { AuthService } from "../auth/auth.service";
+import { RedisService } from "../redis/redis.service";
 
 type HandshakeQueryValue = string | string[] | undefined;
 
@@ -27,14 +24,18 @@ interface RoomJoinState {
 }
 
 @WebSocketGateway({
-  namespace: '/chat',
+  namespace: "/chat",
   cors: {
-    origin: '*',
+    origin: "*",
   },
 })
 @Injectable()
 export class ChatGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
+  implements
+    OnGatewayInit,
+    OnGatewayConnection,
+    OnGatewayDisconnect,
+    OnModuleDestroy
 {
   @WebSocketServer()
   server!: Server;
@@ -50,25 +51,29 @@ export class ChatGateway
   afterInit(server: Server) {
     if (!this.redisListenersBound) {
       const subClient = this.redisService.getSubClient();
-      subClient.psubscribe('chat:messages:*', 'chat:rooms:*', (error) => {
+      subClient.psubscribe("chat:messages:*", "chat:rooms:*", (error) => {
         if (error) {
-          console.error('Failed to subscribe to chat Redis patterns:', error);
+          console.error("Failed to subscribe to chat Redis patterns:", error);
         }
       });
 
-      subClient.on('pmessage', (_pattern, channel, message) => {
+      subClient.on("pmessage", (_pattern, channel, message) => {
         void this.handleRedisEvent(channel, message);
       });
 
       this.redisListenersBound = true;
     }
 
+    // Validate token + roomId in middleware and cache the resolved state so
+    // handleConnection doesn't repeat the same Redis/DB lookups.
     server.use(async (socket, next) => {
       try {
-        await this.validateHandshake(socket);
+        const joinState = await this.resolveJoinState(socket);
+        socket.data.joinState = joinState;
         next();
       } catch (error) {
-        const code = error instanceof Error && error.message ? error.message : '401';
+        const code =
+          error instanceof Error && error.message ? error.message : "401";
         next(new Error(code));
       }
     });
@@ -76,7 +81,9 @@ export class ChatGateway
 
   async handleConnection(client: Socket) {
     try {
-      const { username, roomId } = await this.resolveJoinState(client);
+      // Join state was already resolved and cached by the middleware —
+      // no need to hit Redis/DB again.
+      const { username, roomId } = client.data.joinState as RoomJoinState;
 
       await this.redisService.addActiveUser(roomId, username);
       await this.redisService.setSocketState(client.id, {
@@ -87,23 +94,25 @@ export class ChatGateway
       await client.join(roomId);
 
       const activeUsers = await this.redisService.getActiveUsers(roomId);
-      client.emit('room:joined', { activeUsers });
-      client.to(roomId).emit('room:user_joined', {
+      client.emit("room:joined", { activeUsers });
+      client.to(roomId).emit("room:user_joined", {
         username,
         activeUsers,
       });
     } catch (error) {
-      const code = error instanceof Error && error.message ? error.message : '401';
-      client.emit('error', { code });
+      const code =
+        error instanceof Error && error.message ? error.message : "401";
+      client.emit("error", { code });
       client.disconnect(true);
     }
   }
 
   async handleDisconnect(client: Socket) {
-    await this.cleanupSocket(client, false);
+    // Spec: broadcast room:user_left when a user disconnects OR emits room:leave.
+    await this.cleanupSocket(client, true);
   }
 
-  @SubscribeMessage('room:leave')
+  @SubscribeMessage("room:leave")
   async onRoomLeave(@ConnectedSocket() client: Socket): Promise<void> {
     await this.handleRoomLeave(client);
   }
@@ -117,58 +126,49 @@ export class ChatGateway
     client.disconnect(true);
   }
 
-  private async handleRedisEvent(channel: string, message: string): Promise<void> {
+  private async handleRedisEvent(
+    channel: string,
+    message: string,
+  ): Promise<void> {
     try {
       const payload = JSON.parse(message) as
-        | { event: 'message:new'; roomId: string; message: Record<string, unknown> }
-        | { event: 'room:deleted'; roomId: string };
+        | {
+            event: "message:new";
+            roomId: string;
+            message: Record<string, unknown>;
+          }
+        | { event: "room:deleted"; roomId: string };
 
-      if (channel.startsWith('chat:messages:') && payload.event === 'message:new') {
-        this.server.to(payload.roomId).emit('message:new', payload.message);
+      if (
+        channel.startsWith("chat:messages:") &&
+        payload.event === "message:new"
+      ) {
+        this.server.to(payload.roomId).emit("message:new", payload.message);
         return;
       }
 
-      if (channel.startsWith('chat:rooms:') && payload.event === 'room:deleted') {
-        this.server.to(payload.roomId).emit('room:deleted', {
+      if (
+        channel.startsWith("chat:rooms:") &&
+        payload.event === "room:deleted"
+      ) {
+        this.server.to(payload.roomId).emit("room:deleted", {
           roomId: payload.roomId,
         });
       }
     } catch (error) {
-      console.error('Failed to process Redis chat event:', error);
-    }
-  }
-
-  private async validateHandshake(socket: Socket): Promise<void> {
-    const { token, roomId } = this.readQuery(socket);
-    if (!token || !roomId) {
-      throw new Error('401');
-    }
-
-    const session = await this.authService.validateSession(token);
-    if (!session) {
-      throw new Error('401');
-    }
-
-    const roomExists = await this.db
-      .select()
-      .from(rooms)
-      .where(eq(rooms.id, roomId))
-      .limit(1);
-
-    if (roomExists.length === 0) {
-      throw new Error('404');
+      console.error("Failed to process Redis chat event:", error);
     }
   }
 
   private async resolveJoinState(socket: Socket): Promise<RoomJoinState> {
     const { token, roomId } = this.readQuery(socket);
     if (!token || !roomId) {
-      throw new Error('401');
+      throw new Error("401");
     }
 
     const session = await this.authService.validateSession(token);
     if (!session) {
-      throw new Error('401');
+      throw new Error("401");
     }
 
     const roomExists = await this.db
@@ -178,7 +178,7 @@ export class ChatGateway
       .limit(1);
 
     if (roomExists.length === 0) {
-      throw new Error('404');
+      throw new Error("404");
     }
 
     return {
@@ -187,7 +187,10 @@ export class ChatGateway
     };
   }
 
-  private async cleanupSocket(client: Socket, emitRoomLeft: boolean): Promise<void> {
+  private async cleanupSocket(
+    client: Socket,
+    emitRoomLeft: boolean,
+  ): Promise<void> {
     const state = await this.redisService.getSocketState(client.id);
     if (!state.username || !state.roomId) {
       return;
@@ -198,7 +201,7 @@ export class ChatGateway
 
     if (emitRoomLeft) {
       const activeUsers = await this.redisService.getActiveUsers(state.roomId);
-      client.to(state.roomId).emit('room:user_left', {
+      client.to(state.roomId).emit("room:user_left", {
         username: state.username,
         activeUsers,
       });
@@ -216,7 +219,7 @@ export class ChatGateway
   }
 
   private getFirstQueryValue(value: HandshakeQueryValue): string | undefined {
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       return value;
     }
 

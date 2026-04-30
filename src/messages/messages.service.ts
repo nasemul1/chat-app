@@ -1,12 +1,12 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, lt } from 'drizzle-orm';
-import { DRIZZLE } from '../database/database.module';
-import { messages, rooms } from '../database/schema';
-import { RedisService } from '../redis/redis.service';
-import { generateMessageId } from '../common/utils/id-generator';
-import { RoomNotFoundException } from '../common/exceptions/room-not-found.exception';
-import { MessageTooLongException } from '../common/exceptions/message-too-long.exception';
-import { Room } from '../database/schema';
+import { Inject, Injectable } from "@nestjs/common";
+import { and, desc, eq, lt } from "drizzle-orm";
+import { DRIZZLE } from "../database/database.module";
+import { messages, rooms } from "../database/schema";
+import { RedisService } from "../redis/redis.service";
+import { generateMessageId } from "../common/utils/id-generator";
+import { RoomNotFoundException } from "../common/exceptions/room-not-found.exception";
+import { MessageTooLongException } from "../common/exceptions/message-too-long.exception";
+import { Room } from "../database/schema";
 
 export interface MessagePageItem {
   id: string;
@@ -50,9 +50,30 @@ export class MessagesService {
   ): Promise<PaginatedMessages> {
     await this.assertRoomExists(roomId);
 
-    const whereClause = before
-      ? and(eq(messages.roomId, roomId), lt(messages.id, before))
-      : eq(messages.roomId, roomId);
+    let whereClause;
+
+    if (before) {
+      // Resolve the cursor message's createdAt so we can filter by time.
+      // Using lt(messages.id, before) would be wrong because IDs are random
+      // strings — lexicographic order does not equal insertion order.
+      const cursorRows = await this.db
+        .select({ createdAt: messages.createdAt })
+        .from(messages)
+        .where(and(eq(messages.id, before), eq(messages.roomId, roomId)))
+        .limit(1);
+
+      const cursorCreatedAt =
+        cursorRows.length > 0 ? cursorRows[0].createdAt : null;
+
+      whereClause = cursorCreatedAt
+        ? and(
+            eq(messages.roomId, roomId),
+            lt(messages.createdAt, cursorCreatedAt),
+          )
+        : eq(messages.roomId, roomId);
+    } else {
+      whereClause = eq(messages.roomId, roomId);
+    }
 
     const rows = await this.db
       .select()
@@ -63,7 +84,8 @@ export class MessagesService {
 
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
-    const nextCursor = hasMore && page.length > 0 ? page[page.length - 1].id : null;
+    const nextCursor =
+      hasMore && page.length > 0 ? page[page.length - 1].id : null;
 
     return {
       messages: page,
@@ -79,9 +101,14 @@ export class MessagesService {
   ): Promise<MessagePageItem> {
     await this.assertRoomExists(roomId);
 
-    const trimmedContent = typeof content === 'string' ? content.trim() : '';
-    if (!trimmedContent || trimmedContent.length > 1000) {
-      throw new MessageTooLongException();
+    const trimmedContent = typeof content === "string" ? content.trim() : "";
+    if (!trimmedContent) {
+      throw new MessageTooLongException("Message content cannot be empty");
+    }
+    if (trimmedContent.length > 1000) {
+      throw new MessageTooLongException(
+        "Message content must not exceed 1000 characters",
+      );
     }
 
     const messageId = generateMessageId();
@@ -100,7 +127,7 @@ export class MessagesService {
     await this.redisService.publish(
       `chat:messages:${roomId}`,
       JSON.stringify({
-        event: 'message:new',
+        event: "message:new",
         roomId,
         message: savedMessage,
       }),
