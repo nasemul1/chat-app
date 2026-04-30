@@ -14,13 +14,17 @@ export const DRIZZLE = Symbol('drizzle_db');
       useFactory: async (configService: ConfigService) => {
         const pool = new Pool({
           connectionString: configService.get<string>('DATABASE_URL'),
+          ssl: {
+            rejectUnauthorized: false,
+          },
         });
 
         const db = drizzle(pool, { schema });
+
         return db;
       },
     },
   ],
   exports: [DRIZZLE],
 })
-export class DatabaseModule {}
+export class DatabaseModule { }
